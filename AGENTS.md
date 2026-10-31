@@ -8,7 +8,7 @@ The engineering style guide at `~/.claude/CLAUDE.md` governs. This file states o
 
 Claude Code documents no schema for its transcripts. Every shape this crate reads was read off this machine's store, and each module's header states the shape it reads with the date it was last checked; when a module's reading changes, recheck the shape against current transcripts and refresh that date. A line outside the shape comes back as `Line::Other` or `Line::Malformed` with the pointer of the field that failed, never as an error, so each tool decides how much fails.
 
-The store stands at `~/.claude/projects`. A folder per path a session ran in holds each session's main thread as `<session>.jsonl` and its subagents' beneath `<session>/subagents/`, each beside an `agent-<id>.meta.json` naming its type. Each line is one JSON object, written without spaces, its kind under `type`; `record` reads the `assistant`, `user`, and `attachment` kinds and passes every other over.
+The store stands at `~/.claude/projects`. A folder per path a session ran in holds each session's main thread as `<session>.jsonl` and its subagents' beneath `<session>/subagents/`, each beside an `agent-<id>.meta.json` naming its type. Each line is one JSON object, written without spaces, its kind under `type`; `record` reads the `assistant`, `user`, and `attachment` kinds and the `system` record marking a compaction boundary, and passes every other over.
 
 ## Shape
 
@@ -29,7 +29,7 @@ A test is a function named `when_<operation>_then_<result>` in a module named `g
 A tool takes the crate as a git dependency pinned to a release tag:
 
 ```toml
-claude-code-transcript = { git = "https://github.com/Danglebary/claude-code-transcript", tag = "v0.1.0" }
+claude-code-transcript = { git = "https://github.com/Danglebary/claude-code-transcript", tag = "v0.2.0" }
 ```
 
 A tool built by nixpkgs' `buildRustPackage` names the dependency's hash in its `cargoLock`, keyed by the crate's name and version, and refreshes it whenever the pin moves; the first build after a move fails and prints the hash to write:
@@ -37,7 +37,7 @@ A tool built by nixpkgs' `buildRustPackage` names the dependency's hash in its `
 ```nix
 cargoLock = {
   lockFile = ./Cargo.lock;
-  outputHashes."claude-code-transcript-0.1.0" = "sha256-…";
+  outputHashes."claude-code-transcript-0.2.0" = "sha256-…";
 };
 ```
 

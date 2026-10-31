@@ -6,8 +6,8 @@ use jiff::Timestamp;
 use serde_json::{Value, json};
 
 use super::{
-    Assistant, AssistantBlock, Attachment, Envelope, Line, ResultPart, TextClass, ToolResult,
-    ToolUse, Usage, User, UserBlock, WHOLE_LINE, class_of, read_line,
+    Assistant, AssistantBlock, Attachment, Compaction, Envelope, Line, ResultPart, TextClass,
+    ToolResult, ToolUse, Usage, User, UserBlock, WHOLE_LINE, class_of, read_line,
 };
 
 const SESSION: &str = "9d5fe9d0-d389-44a2-a3ba-a29db8bbb544";
@@ -310,6 +310,45 @@ mod given_an_attachment_record {
             "attachment": { "content": "ok" }
         });
         assert_eq!(read(&record), Line::Malformed("/attachment/type"));
+    }
+}
+
+mod given_a_system_record {
+    use super::*;
+
+    fn compaction() -> Value {
+        json!({
+            "type": "system",
+            "subtype": "compact_boundary",
+            "sessionId": SESSION,
+            "timestamp": STAMP,
+            "level": "info",
+            "compactMetadata": { "trigger": "auto", "preTokens": 967_763, "postTokens": 8_614 }
+        })
+    }
+
+    #[test]
+    fn when_it_marks_a_compaction_boundary_then_its_envelope_is_kept() {
+        let expected = Line::Compaction(Compaction {
+            envelope: envelope(),
+        });
+        assert_eq!(read(&compaction()), expected);
+    }
+
+    #[test]
+    fn when_it_marks_anything_else_then_it_is_other() {
+        for subtype in ["turn_duration", "local_command", "away_summary"] {
+            let mut record = compaction();
+            set(&mut record, "/subtype", json!(subtype));
+            assert_eq!(read(&record), Line::Other, "{subtype}");
+        }
+    }
+
+    #[test]
+    fn when_its_timestamp_fails_its_check_then_the_pointer_names_it() {
+        let mut record = compaction();
+        set(&mut record, "/timestamp", json!("yesterday"));
+        assert_eq!(read(&record), Line::Malformed("/timestamp"));
     }
 }
 

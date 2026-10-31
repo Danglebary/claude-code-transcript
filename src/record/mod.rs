@@ -8,8 +8,9 @@
 //! counts under `id`, `model`, and `usage`, with the effort under the record's `effort`;
 //! a tool result's call under `tool_use_id` and its output under `content`, as a string
 //! or a list of blocks; an output too large to inline saved to a file the record names
-//! under `toolUseResult.persistedOutputPath`; and an attachment under `attachment`, its
-//! kind under `type`.
+//! under `toolUseResult.persistedOutputPath`; an attachment under `attachment`, its kind
+//! under `type`; and a system record's kind under `subtype`, a compaction boundary's
+//! being `compact_boundary`.
 
 use jiff::Timestamp;
 use serde_json::Value;
@@ -24,6 +25,8 @@ pub const WHOLE_LINE: &str = "";
 const ASSISTANT_MARK: &str = "\"type\":\"assistant\"";
 const USER_MARK: &str = "\"type\":\"user\"";
 const ATTACHMENT_MARK: &str = "\"type\":\"attachment\"";
+const COMPACTION_MARK: &str = "\"subtype\":\"compact_boundary\"";
+const COMPACT_BOUNDARY_SUBTYPE: &str = "compact_boundary";
 const SKILL_BODY_OPENING: &str = "Base directory for this skill";
 const SLASH_COMMAND_MARK: &str = "<command-name>";
 const INTERRUPTION_OPENING: &str = "[Request interrupted";
@@ -39,6 +42,8 @@ pub enum Line {
     User(User),
     /// Something Claude Code attached to the context, such as a hook's output.
     Attachment(Attachment),
+    /// A compaction boundary, where Claude Code replaced the context with a summary of it.
+    Compaction(Compaction),
     /// A record of a kind read here none of, such as a queue operation or a cost summary.
     Other,
     /// A record whose field fails its check. The JSON pointer names the field, a block's
@@ -198,6 +203,13 @@ pub struct Attachment {
     pub body: Value,
 }
 
+/// Where Claude Code replaced a thread's context with a summary of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Compaction {
+    /// The session, instant, and subagent the record carries.
+    pub envelope: Envelope,
+}
+
 /// Reads one line of a transcript, its line end left off.
 ///
 /// # Panics
@@ -211,7 +223,9 @@ pub fn read_line(text: &str) -> Line {
     let assistant = text.contains(ASSISTANT_MARK);
     let user = text.contains(USER_MARK);
     let attachment = text.contains(ATTACHMENT_MARK);
-    if !assistant && !user && !attachment {
+    let compaction = text.contains(COMPACTION_MARK);
+    let marked = assistant || user || attachment || compaction;
+    if !marked {
         return Line::Other;
     }
     let Ok(value) = serde_json::from_str::<Value>(text) else {
@@ -224,6 +238,7 @@ pub fn read_line(text: &str) -> Line {
         Some("assistant") => assistant_of(&value).map(Line::Assistant),
         Some("user") => user_of(&value).map(Line::User),
         Some("attachment") => attachment_of(&value).map(Line::Attachment),
+        Some("system") => system_of(&value),
         Some(_) | None => Ok(Line::Other),
     };
     match read {
@@ -487,6 +502,16 @@ fn attachment_of(value: &Value) -> Result<Attachment, &'static str> {
         kind,
         body: attachment.clone(),
     })
+}
+
+/// A system record: a compaction boundary, or a kind read here none of.
+fn system_of(value: &Value) -> Result<Line, &'static str> {
+    let subtype = value.get("subtype").and_then(Value::as_str);
+    if subtype == Some(COMPACT_BOUNDARY_SUBTYPE) {
+        let envelope = envelope_of(value)?;
+        return Ok(Line::Compaction(Compaction { envelope }));
+    }
+    Ok(Line::Other)
 }
 
 /// The string at `pointer`, or `reported` where it is absent or no string.
