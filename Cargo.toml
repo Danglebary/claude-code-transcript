@@ -1,0 +1,53 @@
+[package]
+name = "claude-code-transcript"
+version = "0.1.0"
+edition = "2024"
+# The least compiler the crate is built with, the stable release `rust-toolchain.toml`
+# pins rather than the floor a dependency declares.
+rust-version = "1.99"
+description = "Reads Claude Code's transcripts: where the store keeps them, each file's lines under bounds, each line as a typed record, and each tool call paired with its result"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Danglebary/claude-code-transcript"
+
+[dependencies]
+# Each transcript line is a JSON object, and a tool call's input is handed on as JSON
+# for the tool reading it to take the fields it needs.
+serde_json = "1.0.152"
+# The instant each record names, parsed where the line is read. Parsing a timestamp
+# needs no time zone database, so the default features, which bundle one, are off.
+jiff = { version = "0.2.38", default-features = false, features = ["std"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "deny"
+
+# A programmer error crashes, and it crashes through `assert!` or `unreachable!` with
+# a message at the site, so a failure names what it found rather than where it fell:
+# `unwrap`, `expect`, and a bare `panic!` are denied, and so are the implicit panics of
+# indexing, slicing, and arithmetic, which carry no message.
+[lints.clippy]
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+indexing_slicing = "deny"
+arithmetic_side_effects = "deny"
+unimplemented = "deny"
+unchecked_time_subtraction = "deny"
+todo = "deny"
+string_slice = "deny"
+panic = "deny"
+exit = "deny"
+as_conversions = "deny"
+# An invariant a let-else cannot hold is stated as an unreachable arm.
+unreachable = "allow"
+# The lint flags every assertion in a function returning a result, and a programmer
+# error there crashes rather than becoming an error its caller handles.
+panic_in_result_fn = "allow"
+# The lint rewrites an explicit match into a combinator over closures, which puts
+# both branches and their bindings in one expression a reader has to unwind.
+option_if_let_else = "allow"
+# A compound condition is written as nested `if`s so each half can carry its own
+# `else` and a failure names which half broke; the collapse this lint asks for fuses
+# them back into one condition.
+collapsible_if = "allow"
