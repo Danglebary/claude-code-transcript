@@ -12,12 +12,16 @@ use super::{
 
 const SESSION: &str = "9d5fe9d0-d389-44a2-a3ba-a29db8bbb544";
 const STAMP: &str = "2026-10-31T03:28:13.715Z";
+const DIRECTORY: &str = "/home/admin/projects/pirr";
+const BRANCH: &str = "main";
 
 fn envelope() -> Envelope {
     Envelope {
         session: SESSION.to_owned(),
         timestamp: STAMP.parse::<Timestamp>().unwrap(),
         agent_id: None,
+        cwd: Some(DIRECTORY.to_owned()),
+        git_branch: Some(BRANCH.to_owned()),
     }
 }
 
@@ -26,6 +30,8 @@ fn assistant(content: &Value) -> Value {
         "type": "assistant",
         "sessionId": SESSION,
         "timestamp": STAMP,
+        "cwd": DIRECTORY,
+        "gitBranch": BRANCH,
         "effort": "high",
         "message": {
             "id": "msg_01",
@@ -49,6 +55,8 @@ fn user(content: &Value) -> Value {
         "type": "user",
         "sessionId": SESSION,
         "timestamp": STAMP,
+        "cwd": DIRECTORY,
+        "gitBranch": BRANCH,
         "message": { "role": "user", "content": content }
     })
 }
@@ -120,10 +128,46 @@ mod given_an_assistant_record {
     }
 
     #[test]
+    fn when_it_names_no_directory_then_none_is_kept() {
+        for absent in [None, Some(json!(null))] {
+            let mut record = assistant(&json!([]));
+            match absent {
+                None => {
+                    record.as_object_mut().unwrap().remove("cwd");
+                }
+                Some(field) => set(&mut record, "/cwd", field),
+            }
+            let Line::Assistant(read) = read(&record) else {
+                panic!("an assistant record reads as one");
+            };
+            assert_eq!(read.envelope.cwd, None);
+        }
+    }
+
+    #[test]
+    fn when_it_names_no_branch_then_none_is_kept() {
+        for absent in [None, Some(json!(null))] {
+            let mut record = assistant(&json!([]));
+            match absent {
+                None => {
+                    record.as_object_mut().unwrap().remove("gitBranch");
+                }
+                Some(field) => set(&mut record, "/gitBranch", field),
+            }
+            let Line::Assistant(read) = read(&record) else {
+                panic!("an assistant record reads as one");
+            };
+            assert_eq!(read.envelope.git_branch, None);
+        }
+    }
+
+    #[test]
     fn when_a_field_fails_its_check_then_the_pointer_names_it() {
-        let cases: [(&str, Value, &str); 7] = [
+        let cases: [(&str, Value, &str); 9] = [
             ("/sessionId", json!(""), "/sessionId"),
             ("/timestamp", json!("yesterday"), "/timestamp"),
+            ("/cwd", json!(""), "/cwd"),
+            ("/gitBranch", json!(7), "/gitBranch"),
             ("/message/id", json!(null), "/message/id"),
             ("/message/model", json!(7), "/message/model"),
             ("/message/usage", json!(null), "/message/usage"),
@@ -291,6 +335,8 @@ mod given_an_attachment_record {
             "type": "attachment",
             "sessionId": SESSION,
             "timestamp": STAMP,
+            "cwd": DIRECTORY,
+            "gitBranch": BRANCH,
             "attachment": body
         });
         let expected = Line::Attachment(Attachment {
@@ -307,6 +353,8 @@ mod given_an_attachment_record {
             "type": "attachment",
             "sessionId": SESSION,
             "timestamp": STAMP,
+            "cwd": DIRECTORY,
+            "gitBranch": BRANCH,
             "attachment": { "content": "ok" }
         });
         assert_eq!(read(&record), Line::Malformed("/attachment/type"));
@@ -322,6 +370,8 @@ mod given_a_system_record {
             "subtype": "compact_boundary",
             "sessionId": SESSION,
             "timestamp": STAMP,
+            "cwd": DIRECTORY,
+            "gitBranch": BRANCH,
             "level": "info",
             "compactMetadata": { "trigger": "auto", "preTokens": 967_763, "postTokens": 8_614 }
         })
