@@ -15,6 +15,8 @@ fn envelope() -> Envelope {
         session: "s1".to_owned(),
         timestamp: "2026-10-31T03:28:13.715Z".parse::<Timestamp>().unwrap(),
         agent_id: None,
+        cwd: None,
+        git_branch: None,
     }
 }
 

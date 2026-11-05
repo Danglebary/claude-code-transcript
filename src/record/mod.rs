@@ -1,16 +1,17 @@
 //! One line of a transcript read into what it records. Everything here is pure.
 //!
 //! The shape is the one Claude Code's files hold, read off this machine's transcripts
-//! (checked 2026-10-30): one JSON object per line, written without spaces; the record's
-//! kind under `type`; the session under `sessionId`, the instant under `timestamp`, and a
-//! subagent's id under `agentId`; an assistant's or user's message under `message`, whose
-//! `content` is a string or a list of blocks; an assistant message's id, model, and token
-//! counts under `id`, `model`, and `usage`, with the effort under the record's `effort`;
-//! a tool result's call under `tool_use_id` and its output under `content`, as a string
-//! or a list of blocks; an output too large to inline saved to a file the record names
-//! under `toolUseResult.persistedOutputPath`; an attachment under `attachment`, its kind
-//! under `type`; and a system record's kind under `subtype`, a compaction boundary's
-//! being `compact_boundary`.
+//! (checked 2026-11-05): one JSON object per line, written without spaces; the record's
+//! kind under `type`; the session under `sessionId`, the instant under `timestamp`, a
+//! subagent's id under `agentId`, the directory the session ran in under `cwd`, and the
+//! branch git named there under `gitBranch`; an assistant's or user's message under
+//! `message`, whose `content` is a string or a list of blocks; an assistant message's
+//! id, model, and token counts under `id`, `model`, and `usage`, with the effort under
+//! the record's `effort`; a tool result's call under `tool_use_id` and its output under
+//! `content`, as a string or a list of blocks; an output too large to inline saved to a
+//! file the record names under `toolUseResult.persistedOutputPath`; an attachment under
+//! `attachment`, its kind under `type`; and a system record's kind under `subtype`, a
+//! compaction boundary's being `compact_boundary`.
 
 use jiff::Timestamp;
 use serde_json::Value;
@@ -60,6 +61,12 @@ pub struct Envelope {
     pub timestamp: Timestamp,
     /// The subagent whose transcript holds the record; none on a main thread.
     pub agent_id: Option<String>,
+    /// The directory the session ran in when Claude Code wrote the record; none where the
+    /// record names none.
+    pub cwd: Option<String>,
+    /// The branch git named in that directory, as git names it; none where the record
+    /// names none.
+    pub git_branch: Option<String>,
 }
 
 /// A model call's record. Claude Code writes a call's record once for each of its
@@ -290,10 +297,20 @@ fn envelope_of(value: &Value) -> Result<Envelope, &'static str> {
         None | Some(Value::Null) => None,
         Some(_) => Some(name_at(value, "/agentId", "/agentId")?),
     };
+    let cwd = match value.get("cwd") {
+        None | Some(Value::Null) => None,
+        Some(_) => Some(name_at(value, "/cwd", "/cwd")?),
+    };
+    let git_branch = match value.get("gitBranch") {
+        None | Some(Value::Null) => None,
+        Some(_) => Some(string_at(value, "/gitBranch", "/gitBranch")?),
+    };
     Ok(Envelope {
         session,
         timestamp,
         agent_id,
+        cwd,
+        git_branch,
     })
 }
 

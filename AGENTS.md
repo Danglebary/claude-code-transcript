@@ -29,7 +29,7 @@ A test is a function named `when_<operation>_then_<result>` in a module named `g
 A tool takes the crate as a git dependency pinned to a release tag:
 
 ```toml
-claude-code-transcript = { git = "https://github.com/Danglebary/claude-code-transcript", tag = "v0.2.0" }
+claude-code-transcript = { git = "https://github.com/Danglebary/claude-code-transcript", tag = "v0.3.0" }
 ```
 
 A tool built by nixpkgs' `buildRustPackage` names the dependency's hash in its `cargoLock`, keyed by the crate's name and version, and refreshes it whenever the pin moves; the first build after a move fails and prints the hash to write:
@@ -37,7 +37,7 @@ A tool built by nixpkgs' `buildRustPackage` names the dependency's hash in its `
 ```nix
 cargoLock = {
   lockFile = ./Cargo.lock;
-  outputHashes."claude-code-transcript-0.2.0" = "sha256-…";
+  outputHashes."claude-code-transcript-0.3.0" = "sha256-…";
 };
 ```
 
