@@ -3,15 +3,19 @@
 //! The shape is the one Claude Code's files hold, read off this machine's transcripts
 //! (checked 2026-11-05): one JSON object per line, written without spaces; the record's
 //! kind under `type`; the session under `sessionId`, the instant under `timestamp`, a
-//! subagent's id under `agentId`, the directory the session ran in under `cwd`, and the
-//! branch git named there under `gitBranch`; an assistant's or user's message under
+//! subagent's id under `agentId`, the directory the session ran in under `cwd`, the
+//! branch git named there under `gitBranch`, and the Claude Code release that wrote the
+//! record under `version`; an assistant's or user's message under
 //! `message`, whose `content` is a string or a list of blocks; an assistant message's
 //! id, model, and token counts under `id`, `model`, and `usage`, with the effort under
 //! the record's `effort`; a tool result's call under `tool_use_id` and its output under
 //! `content`, as a string or a list of blocks; an output too large to inline saved to a
-//! file the record names under `toolUseResult.persistedOutputPath`; an attachment under
-//! `attachment`, its kind under `type`; and a system record's kind under `subtype`, a
-//! compaction boundary's being `compact_boundary`.
+//! file the record names under `toolUseResult.persistedOutputPath`; a commit a tool call
+//! made under `toolUseResult.gitOperation.commit`, its id as git abbreviates it under
+//! `sha`, `committed` or `amended` under `kind`, and its branch under `branch`, beside
+//! `push`, `pr`, and `branch` objects not read here; an attachment under `attachment`, its
+//! kind under `type`; and a system record's kind under `subtype`, a compaction boundary's
+//! being `compact_boundary`. A `toolUseResult` is a string where the call failed.
 
 use jiff::Timestamp;
 use serde_json::Value;
@@ -23,6 +27,10 @@ pub const TOKENS_PER_FIELD_MAX: u64 = 10_000_000;
 /// The pointer a malformed record names where the line is no JSON object.
 pub const WHOLE_LINE: &str = "";
 
+/// The most hex digits a commit id is read as holding: a SHA-256 object name's, a SHA-1
+/// name's 40 fitting beneath it. An id above it is unread.
+pub const COMMIT_ID_LENGTH_MAX: usize = 64;
+
 const ASSISTANT_MARK: &str = "\"type\":\"assistant\"";
 const USER_MARK: &str = "\"type\":\"user\"";
 const ATTACHMENT_MARK: &str = "\"type\":\"attachment\"";
@@ -33,6 +41,12 @@ const SLASH_COMMAND_MARK: &str = "<command-name>";
 const INTERRUPTION_OPENING: &str = "[Request interrupted";
 const TAG_OPENING: char = '<';
 const LINE_END: char = '\n';
+const PERSISTED_OUTPUT: &str = "/toolUseResult/persistedOutputPath";
+const GIT_OPERATION: &str = "/toolUseResult/gitOperation";
+const COMMIT: &str = "/toolUseResult/gitOperation/commit";
+const COMMIT_SHA: &str = "/toolUseResult/gitOperation/commit/sha";
+const COMMIT_KIND: &str = "/toolUseResult/gitOperation/commit/kind";
+const COMMIT_BRANCH: &str = "/toolUseResult/gitOperation/commit/branch";
 
 /// What one line of a transcript records.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +81,9 @@ pub struct Envelope {
     /// The branch git named in that directory, as git names it; none where the record
     /// names none.
     pub git_branch: Option<String>,
+    /// The Claude Code release that wrote the record, such as `2.1.292`; none where the
+    /// record names none.
+    pub version: Option<String>,
 }
 
 /// A model call's record. Claude Code writes a call's record once for each of its
@@ -186,6 +203,44 @@ pub struct ToolResult {
     /// The file Claude Code saved an output too large to inline to. A record names one
     /// saved path, so it is the result's only where the record holds one result.
     pub persisted_output: Option<String>,
+    /// The commit the call made, read under the same rule as `persisted_output`.
+    pub commit: CommitReport,
+}
+
+/// What a tool result's record reports of a commit git made. No shape of the report makes
+/// the record malformed, so a commit read here none of leaves the rest of the record read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommitReport {
+    /// The record reports no commit.
+    Unreported,
+    /// The record reports a commit and holds several results, so the commit is no one
+    /// result's.
+    Unattributed,
+    /// The commit the call made.
+    Commit(Commit),
+    /// The record reports a commit in a shape not read here. The JSON pointer names the
+    /// field that failed its check.
+    Unread(&'static str),
+}
+
+/// A commit git made in a tool call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Commit {
+    /// The commit's id in lowercase hex, abbreviated as git writes it in its output.
+    pub sha: String,
+    /// Whether the call made a new commit or amended one.
+    pub kind: CommitKind,
+    /// The branch the commit landed on.
+    pub branch: String,
+}
+
+/// How a tool call made a commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CommitKind {
+    /// A new commit.
+    Committed,
+    /// A commit replacing the one the branch named.
+    Amended,
 }
 
 /// One part of a tool's output.
@@ -305,12 +360,17 @@ fn envelope_of(value: &Value) -> Result<Envelope, &'static str> {
         None | Some(Value::Null) => None,
         Some(_) => Some(string_at(value, "/gitBranch", "/gitBranch")?),
     };
+    let version = match value.get("version") {
+        None | Some(Value::Null) => None,
+        Some(_) => Some(name_at(value, "/version", "/version")?),
+    };
     Ok(Envelope {
         session,
         timestamp,
         agent_id,
         cwd,
         git_branch,
+        version,
     })
 }
 
@@ -414,31 +474,11 @@ fn user_of(value: &Value) -> Result<User, &'static str> {
 }
 
 fn user_blocks_of(value: &Value, content: &[Value]) -> Result<Vec<UserBlock>, &'static str> {
-    let mut results: usize = 0;
-    for block in content {
-        if block.get("type").and_then(Value::as_str) == Some("tool_result") {
-            let Some(more) = results.checked_add(1) else {
-                unreachable!("the blocks of a bounded line fit a usize")
-            };
-            results = more;
-        }
-    }
-    // A record names a single saved path, which can belong to a single result alone.
-    let persisted_output = if results == 1 {
-        match value.pointer("/toolUseResult/persistedOutputPath") {
-            None | Some(Value::Null) => None,
-            Some(_) => Some(name_at(
-                value,
-                "/toolUseResult/persistedOutputPath",
-                "/toolUseResult/persistedOutputPath",
-            )?),
-        }
-    } else {
-        None
-    };
+    let results = results_in(content);
+    let reported = reported_of(value, results)?;
     let mut blocks = Vec::with_capacity(content.len());
     for block in content {
-        let read = user_block_of(block, persisted_output.as_deref())?;
+        let read = user_block_of(block, &reported)?;
         blocks.push(read);
     }
     assert_eq!(
@@ -449,14 +489,104 @@ fn user_blocks_of(value: &Value, content: &[Value]) -> Result<Vec<UserBlock>, &'
     Ok(blocks)
 }
 
-fn user_block_of(block: &Value, persisted: Option<&str>) -> Result<UserBlock, &'static str> {
+/// What a record's `toolUseResult` reports of the results it holds.
+struct Reported {
+    persisted_output: Option<String>,
+    commit: CommitReport,
+}
+
+/// The tool results among a user record's blocks.
+fn results_in(content: &[Value]) -> usize {
+    let mut results: usize = 0;
+    for block in content {
+        if block.get("type").and_then(Value::as_str) == Some("tool_result") {
+            let Some(more) = results.checked_add(1) else {
+                unreachable!("the blocks of a bounded line fit a usize")
+            };
+            results = more;
+        }
+    }
+    assert!(results <= content.len(), "each result is one block");
+    results
+}
+
+/// A record names a single saved path and a single commit, each of which can belong to a
+/// single result alone.
+fn reported_of(value: &Value, results: usize) -> Result<Reported, &'static str> {
+    let commit = commit_report_of(value);
+    if results == 1 {
+        let persisted_output = match value.pointer(PERSISTED_OUTPUT) {
+            None | Some(Value::Null) => None,
+            Some(_) => Some(name_at(value, PERSISTED_OUTPUT, PERSISTED_OUTPUT)?),
+        };
+        return Ok(Reported {
+            persisted_output,
+            commit,
+        });
+    }
+    let unowned = match commit {
+        CommitReport::Unreported => CommitReport::Unreported,
+        CommitReport::Unattributed | CommitReport::Commit(_) | CommitReport::Unread(_) => {
+            CommitReport::Unattributed
+        }
+    };
+    Ok(Reported {
+        persisted_output: None,
+        commit: unowned,
+    })
+}
+
+/// What the record's `toolUseResult.gitOperation` reports of a commit.
+fn commit_report_of(value: &Value) -> CommitReport {
+    let commit = match value.pointer(GIT_OPERATION) {
+        None | Some(Value::Null) => return CommitReport::Unreported,
+        Some(Value::Object(operation)) => operation.get("commit"),
+        Some(_) => return CommitReport::Unread(GIT_OPERATION),
+    };
+    match commit {
+        None | Some(Value::Null) => return CommitReport::Unreported,
+        Some(Value::Object(_)) => {}
+        Some(_) => return CommitReport::Unread(COMMIT),
+    }
+    let Ok(sha) = string_at(value, COMMIT_SHA, COMMIT_SHA) else {
+        return CommitReport::Unread(COMMIT_SHA);
+    };
+    if !is_commit_id(&sha) {
+        return CommitReport::Unread(COMMIT_SHA);
+    }
+    let kind = match value.pointer(COMMIT_KIND).and_then(Value::as_str) {
+        Some("committed") => CommitKind::Committed,
+        Some("amended") => CommitKind::Amended,
+        Some(_) | None => return CommitReport::Unread(COMMIT_KIND),
+    };
+    let Ok(branch) = name_at(value, COMMIT_BRANCH, COMMIT_BRANCH) else {
+        return CommitReport::Unread(COMMIT_BRANCH);
+    };
+    assert!(!branch.is_empty(), "a commit's branch is named");
+    CommitReport::Commit(Commit { sha, kind, branch })
+}
+
+/// Whether `sha` is a commit id as git writes one: lowercase hex, from one digit to
+/// [`COMMIT_ID_LENGTH_MAX`].
+fn is_commit_id(sha: &str) -> bool {
+    if sha.is_empty() {
+        return false;
+    }
+    if sha.len() > COMMIT_ID_LENGTH_MAX {
+        return false;
+    }
+    sha.chars()
+        .all(|digit| digit.is_ascii_digit() || matches!(digit, 'a'..='f'))
+}
+
+fn user_block_of(block: &Value, reported: &Reported) -> Result<UserBlock, &'static str> {
     match block.get("type").and_then(Value::as_str) {
         Some("text") => {
             let text = string_at(block, "/text", "/message/content/*/text")?;
             Ok(text_block(&text))
         }
         Some("tool_result") => {
-            let result = tool_result_of(block, persisted)?;
+            let result = tool_result_of(block, reported)?;
             Ok(UserBlock::ToolResult(result))
         }
         Some("image") => Ok(UserBlock::Image),
@@ -472,7 +602,7 @@ fn text_block(text: &str) -> UserBlock {
     }
 }
 
-fn tool_result_of(block: &Value, persisted: Option<&str>) -> Result<ToolResult, &'static str> {
+fn tool_result_of(block: &Value, reported: &Reported) -> Result<ToolResult, &'static str> {
     let tool_use_id = name_at(block, "/tool_use_id", "/message/content/*/tool_use_id")?;
     let is_error = flag_at(block, "/is_error", "/message/content/*/is_error")?;
     let parts = match block.get("content") {
@@ -492,7 +622,8 @@ fn tool_result_of(block: &Value, persisted: Option<&str>) -> Result<ToolResult, 
         tool_use_id,
         is_error,
         parts,
-        persisted_output: persisted.map(str::to_owned),
+        persisted_output: reported.persisted_output.clone(),
+        commit: reported.commit.clone(),
     })
 }
 
