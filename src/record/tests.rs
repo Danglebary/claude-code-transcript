@@ -6,14 +6,17 @@ use jiff::Timestamp;
 use serde_json::{Value, json};
 
 use super::{
-    Assistant, AssistantBlock, Attachment, Compaction, Envelope, Line, ResultPart, TextClass,
-    ToolResult, ToolUse, Usage, User, UserBlock, WHOLE_LINE, class_of, read_line,
+    Assistant, AssistantBlock, Attachment, Commit, CommitKind, CommitReport, Compaction, Envelope,
+    Line, ResultPart, TextClass, ToolResult, ToolUse, Usage, User, UserBlock, WHOLE_LINE, class_of,
+    read_line,
 };
 
 const SESSION: &str = "9d5fe9d0-d389-44a2-a3ba-a29db8bbb544";
 const STAMP: &str = "2026-10-31T03:28:13.715Z";
 const DIRECTORY: &str = "/home/admin/projects/pirr";
 const BRANCH: &str = "main";
+const RELEASE: &str = "2.1.292";
+const SHA: &str = "1a2b3c4";
 
 fn envelope() -> Envelope {
     Envelope {
@@ -22,6 +25,7 @@ fn envelope() -> Envelope {
         agent_id: None,
         cwd: Some(DIRECTORY.to_owned()),
         git_branch: Some(BRANCH.to_owned()),
+        version: Some(RELEASE.to_owned()),
     }
 }
 
@@ -32,6 +36,7 @@ fn assistant(content: &Value) -> Value {
         "timestamp": STAMP,
         "cwd": DIRECTORY,
         "gitBranch": BRANCH,
+        "version": RELEASE,
         "effort": "high",
         "message": {
             "id": "msg_01",
@@ -57,6 +62,7 @@ fn user(content: &Value) -> Value {
         "timestamp": STAMP,
         "cwd": DIRECTORY,
         "gitBranch": BRANCH,
+        "version": RELEASE,
         "message": { "role": "user", "content": content }
     })
 }
@@ -162,12 +168,31 @@ mod given_an_assistant_record {
     }
 
     #[test]
+    fn when_it_names_no_release_then_none_is_kept() {
+        for absent in [None, Some(json!(null))] {
+            let mut record = assistant(&json!([]));
+            match absent {
+                None => {
+                    record.as_object_mut().unwrap().remove("version");
+                }
+                Some(field) => set(&mut record, "/version", field),
+            }
+            let Line::Assistant(read) = read(&record) else {
+                panic!("an assistant record reads as one");
+            };
+            assert_eq!(read.envelope.version, None);
+        }
+    }
+
+    #[test]
     fn when_a_field_fails_its_check_then_the_pointer_names_it() {
-        let cases: [(&str, Value, &str); 9] = [
+        let cases: [(&str, Value, &str); 11] = [
             ("/sessionId", json!(""), "/sessionId"),
             ("/timestamp", json!("yesterday"), "/timestamp"),
             ("/cwd", json!(""), "/cwd"),
             ("/gitBranch", json!(7), "/gitBranch"),
+            ("/version", json!(2.1), "/version"),
+            ("/version", json!(""), "/version"),
             ("/message/id", json!(null), "/message/id"),
             ("/message/model", json!(7), "/message/model"),
             ("/message/usage", json!(null), "/message/usage"),
@@ -252,6 +277,7 @@ mod given_a_user_record {
                 ResultPart::Other(json!({ "type": "tool_reference", "tool_name": "Read" })),
             ],
             persisted_output: None,
+            commit: CommitReport::Unreported,
         })];
         let Line::User(read) = read(&user(&content)) else {
             panic!("a user record reads as one");
@@ -325,6 +351,164 @@ mod given_a_user_record {
     }
 }
 
+mod given_a_user_record_reporting_a_commit {
+    use super::*;
+
+    const COMMIT_BRANCH: &str = "feature";
+    const OUTPUT: &str = "[feature 1a2b3c4] Add a file";
+
+    fn bash_result(tool_use_result: Value) -> Value {
+        let content =
+            json!([{ "type": "tool_result", "tool_use_id": "toolu_01", "content": OUTPUT }]);
+        let mut record = user(&content);
+        record["toolUseResult"] = tool_use_result;
+        record
+    }
+
+    fn reporting(git_operation: &Value) -> Value {
+        json!({ "stdout": OUTPUT, "stderr": "", "gitOperation": git_operation })
+    }
+
+    fn commit_operation(kind: &str) -> Value {
+        json!({ "commit": { "sha": SHA, "kind": kind, "branch": COMMIT_BRANCH } })
+    }
+
+    fn only_result(record: &Value) -> ToolResult {
+        let Line::User(read) = read(record) else {
+            panic!("a user record reads as one");
+        };
+        let [UserBlock::ToolResult(result)] = read.blocks.as_slice() else {
+            panic!("the record holds one result");
+        };
+        result.clone()
+    }
+
+    fn results(record: &Value) -> Vec<ToolResult> {
+        let Line::User(read) = read(record) else {
+            panic!("a user record reads as one");
+        };
+        let mut results = Vec::new();
+        for block in read.blocks {
+            let UserBlock::ToolResult(result) = block else {
+                panic!("the record holds results alone");
+            };
+            results.push(result);
+        }
+        results
+    }
+
+    fn two_results(tool_use_result: Value) -> Value {
+        let content = json!([
+            { "type": "tool_result", "tool_use_id": "toolu_01", "content": OUTPUT },
+            { "type": "tool_result", "tool_use_id": "toolu_02", "content": OUTPUT }
+        ]);
+        let mut record = user(&content);
+        record["toolUseResult"] = tool_use_result;
+        record
+    }
+
+    #[test]
+    fn when_one_result_reports_a_commit_then_its_commit_is_read() {
+        let cases: [(&str, CommitKind); 2] = [
+            ("committed", CommitKind::Committed),
+            ("amended", CommitKind::Amended),
+        ];
+        for (kind, read_kind) in cases {
+            let operation = commit_operation(kind);
+            let tool_use_result = reporting(&operation);
+            let record = bash_result(tool_use_result);
+            let expected = CommitReport::Commit(Commit {
+                sha: SHA.to_owned(),
+                kind: read_kind,
+                branch: COMMIT_BRANCH.to_owned(),
+            });
+            assert_eq!(only_result(&record).commit, expected, "{kind}");
+        }
+    }
+
+    #[test]
+    fn when_it_reports_no_commit_then_none_is_reported() {
+        let cases: [Value; 6] = [
+            json!({ "stdout": OUTPUT, "stderr": "" }),
+            json!("Error: Exit code 1"),
+            reporting(&json!(null)),
+            reporting(&json!({ "push": { "branch": COMMIT_BRANCH } })),
+            reporting(&json!({
+                "pr": { "number": 7, "action": "created", "url": "https://example.com/pull/7" },
+                "push": { "branch": COMMIT_BRANCH }
+            })),
+            reporting(
+                &json!({ "commit": null, "branch": { "ref": COMMIT_BRANCH, "action": "created" } }),
+            ),
+        ];
+        for tool_use_result in cases {
+            let record = bash_result(tool_use_result.clone());
+            let read = only_result(&record);
+            assert_eq!(read.commit, CommitReport::Unreported, "{tool_use_result}");
+        }
+    }
+
+    #[test]
+    fn when_its_commit_is_in_a_shape_not_read_then_the_pointer_names_it_and_the_result_is_kept() {
+        let operation = "/toolUseResult/gitOperation";
+        let commit = "/toolUseResult/gitOperation/commit";
+        let sha = "/toolUseResult/gitOperation/commit/sha";
+        let kind = "/toolUseResult/gitOperation/commit/kind";
+        let branch = "/toolUseResult/gitOperation/commit/branch";
+        let cases: [(&str, Value, &str); 11] = [
+            (operation, json!(["commit"]), operation),
+            (commit, json!(SHA), commit),
+            (sha, json!(7), sha),
+            (sha, json!(""), sha),
+            (sha, json!("1A2B3C4"), sha),
+            (sha, json!("a".repeat(65)), sha),
+            (kind, json!("reverted"), kind),
+            (kind, json!(null), kind),
+            (branch, json!(""), branch),
+            (branch, json!(null), branch),
+            (branch, json!([COMMIT_BRANCH]), branch),
+        ];
+        for (pointer, field, named) in cases {
+            let operation = commit_operation("committed");
+            let tool_use_result = reporting(&operation);
+            let mut record = bash_result(tool_use_result);
+            set(&mut record, pointer, field);
+            let expected = ToolResult {
+                tool_use_id: "toolu_01".to_owned(),
+                is_error: false,
+                parts: vec![ResultPart::Text(OUTPUT.to_owned())],
+                persisted_output: None,
+                commit: CommitReport::Unread(named),
+            };
+            assert_eq!(only_result(&record), expected, "{pointer}");
+        }
+    }
+
+    #[test]
+    fn when_two_results_share_a_commit_then_neither_takes_it() {
+        let operation = commit_operation("committed");
+        let tool_use_result = reporting(&operation);
+        let record = two_results(tool_use_result);
+        let read = results(&record);
+        assert_eq!(read.len(), 2);
+        for result in read {
+            assert_eq!(result.commit, CommitReport::Unattributed);
+        }
+    }
+
+    #[test]
+    fn when_two_results_report_no_commit_then_neither_has_one() {
+        let operation = json!({ "push": { "branch": COMMIT_BRANCH } });
+        let tool_use_result = reporting(&operation);
+        let record = two_results(tool_use_result);
+        let read = results(&record);
+        assert_eq!(read.len(), 2);
+        for result in read {
+            assert_eq!(result.commit, CommitReport::Unreported);
+        }
+    }
+}
+
 mod given_an_attachment_record {
     use super::*;
 
@@ -337,6 +521,7 @@ mod given_an_attachment_record {
             "timestamp": STAMP,
             "cwd": DIRECTORY,
             "gitBranch": BRANCH,
+            "version": RELEASE,
             "attachment": body
         });
         let expected = Line::Attachment(Attachment {
@@ -355,6 +540,7 @@ mod given_an_attachment_record {
             "timestamp": STAMP,
             "cwd": DIRECTORY,
             "gitBranch": BRANCH,
+            "version": RELEASE,
             "attachment": { "content": "ok" }
         });
         assert_eq!(read(&record), Line::Malformed("/attachment/type"));
@@ -372,6 +558,7 @@ mod given_a_system_record {
             "timestamp": STAMP,
             "cwd": DIRECTORY,
             "gitBranch": BRANCH,
+            "version": RELEASE,
             "level": "info",
             "compactMetadata": { "trigger": "auto", "preTokens": 967_763, "postTokens": 8_614 }
         })

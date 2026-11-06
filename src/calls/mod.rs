@@ -44,7 +44,7 @@ pub enum Awaited {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Completed {
     /// The result completes an awaited call.
-    Paired(Paired),
+    Paired(Box<Paired>),
     /// No awaited call has the result's id, and the result is handed back.
     Unawaited(ToolResult),
 }
@@ -142,7 +142,8 @@ impl Pairing {
             call.tool_use.id, result.tool_use_id,
             "a result pairs with its call"
         );
-        Completed::Paired(Paired { call, result })
+        let paired = Paired { call, result };
+        Completed::Paired(Box::new(paired))
     }
 
     /// The calls awaiting their results.

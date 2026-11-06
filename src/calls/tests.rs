@@ -7,7 +7,8 @@ use serde_json::json;
 
 use super::{Awaited, CALLS_AWAITING_MAX, Call, Completed, Paired, Pairing, calls_of, results_of};
 use crate::record::{
-    Assistant, AssistantBlock, Envelope, ResultPart, ToolResult, ToolUse, Usage, User, UserBlock,
+    Assistant, AssistantBlock, CommitReport, Envelope, ResultPart, ToolResult, ToolUse, Usage,
+    User, UserBlock,
 };
 
 fn envelope() -> Envelope {
@@ -17,6 +18,7 @@ fn envelope() -> Envelope {
         agent_id: None,
         cwd: None,
         git_branch: None,
+        version: None,
     }
 }
 
@@ -41,6 +43,7 @@ fn result(id: &str) -> ToolResult {
         is_error: false,
         parts: vec![ResultPart::Text("Cargo.toml".to_owned())],
         persisted_output: None,
+        commit: CommitReport::Unreported,
     }
 }
 
@@ -81,10 +84,11 @@ mod given_a_call_awaited {
     fn when_its_result_arrives_then_the_two_are_paired_and_it_awaits_no_longer() {
         let mut pairing = Pairing::new();
         assert_eq!(pairing.await_call(call("toolu_01")), Awaited::Held);
-        let expected = Completed::Paired(Paired {
+        let paired = Paired {
             call: call("toolu_01"),
             result: result("toolu_01"),
-        });
+        };
+        let expected = Completed::Paired(Box::new(paired));
         assert_eq!(pairing.complete(result("toolu_01")), expected);
         assert_eq!(pairing.awaiting(), 0);
     }
