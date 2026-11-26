@@ -12,7 +12,7 @@ The store stands at `~/.claude/projects`. A folder per path a session ran in hol
 
 ## Shape
 
-`src/lib.rs` declares four modules. `record` reads one line into a typed `Line` and `calls` pairs each tool call with its result; both do no IO, and their tests replay fixture lines. `store` lists the store's folders and each folder's transcripts, and `lines` reads one transcript a line at a time; both read disk under the bounds their constants name, and their tests read real files in a scratch directory. A tool call's input stays JSON, since each tool reads fields of its own.
+`src/lib.rs` declares four modules. `record` reads one line into a typed `Line` and a usage object alone into its `Usage`, and `calls` pairs each tool call with its result; both do no IO, and their tests replay fixture lines. `store` lists the store's folders and each folder's transcripts, and `lines` reads one transcript a line at a time; both read disk under the bounds their constants name, and their tests read real files in a scratch directory. A tool call's input stays JSON, since each tool reads fields of its own.
 
 The lint table in `Cargo.toml` denies `unwrap`, `expect`, `panic!`, indexing, slicing, string slicing, `as` casts, and unchecked arithmetic. A programmer error crashes through `assert!` or `unreachable!` with a message; arithmetic goes through `checked_*` with a `let ... else { unreachable!(..) }`.
 
@@ -29,7 +29,7 @@ A test is a function named `when_<operation>_then_<result>` in a module named `g
 A tool takes the crate as a git dependency pinned to a release tag:
 
 ```toml
-claude-code-transcript = { git = "https://github.com/Danglebary/claude-code-transcript", tag = "v0.4.0" }
+claude-code-transcript = { git = "https://github.com/Danglebary/claude-code-transcript", tag = "v0.5.0" }
 ```
 
 A tool built by nixpkgs' `buildRustPackage` names the dependency's hash in its `cargoLock`, keyed by the crate's name and version, and refreshes it whenever the pin moves; the first build after a move fails and prints the hash to write:
@@ -37,7 +37,7 @@ A tool built by nixpkgs' `buildRustPackage` names the dependency's hash in its `
 ```nix
 cargoLock = {
   lockFile = ./Cargo.lock;
-  outputHashes."claude-code-transcript-0.4.0" = "sha256-…";
+  outputHashes."claude-code-transcript-0.5.0" = "sha256-…";
 };
 ```
 

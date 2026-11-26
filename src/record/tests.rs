@@ -1,14 +1,15 @@
-//! What `read_line` makes of each kind of record and `class_of` of each kind of text. Each
-//! case builds a line from a valid record of its kind, written as Claude Code writes it,
-//! with one field overridden where the case breaks it, and asserts on the whole outcome.
+//! What `read_line` makes of each kind of record, `read_usage` of a usage object, and
+//! `class_of` of each kind of text. Each case builds a line or a usage object from a valid
+//! one of its kind, written as Claude Code writes it, with one field overridden where the
+//! case breaks it, and asserts on the whole outcome.
 
 use jiff::Timestamp;
 use serde_json::{Value, json};
 
 use super::{
     Assistant, AssistantBlock, Attachment, Commit, CommitKind, CommitReport, Compaction, Envelope,
-    Line, ResultPart, TextClass, ToolResult, ToolUse, Usage, User, UserBlock, WHOLE_LINE, class_of,
-    read_line,
+    Line, ResultPart, TOKENS_PER_FIELD_MAX, TextClass, ToolResult, ToolUse, Usage, UsageField,
+    User, UserBlock, WHOLE_LINE, class_of, read_line, read_usage,
 };
 
 const SESSION: &str = "9d5fe9d0-d389-44a2-a3ba-a29db8bbb544";
@@ -45,6 +46,7 @@ fn assistant(content: &Value) -> Value {
             "usage": {
                 "input_tokens": 3,
                 "cache_read_input_tokens": 40,
+                "cache_creation_input_tokens": 7,
                 "cache_creation": {
                     "ephemeral_5m_input_tokens": 0,
                     "ephemeral_1h_input_tokens": 7
@@ -75,6 +77,84 @@ fn set(record: &mut Value, pointer: &str, field: Value) {
     *record.pointer_mut(pointer).unwrap() = field;
 }
 
+/// Removes the field `pointer` names from the object holding it.
+fn remove(record: &mut Value, pointer: &str) {
+    let (holder, key) = pointer.rsplit_once('/').unwrap();
+    record
+        .pointer_mut(holder)
+        .unwrap()
+        .as_object_mut()
+        .unwrap()
+        .remove(key)
+        .unwrap();
+}
+
+/// A usage object as Claude Code 2.1.300 writes it in a print-mode result, read
+/// 2026-11-26, each count distinct so a count read from the wrong field shows.
+fn usage() -> Value {
+    json!({
+        "input_tokens": 2,
+        "cache_creation_input_tokens": 48_109,
+        "cache_read_input_tokens": 10_698,
+        "output_tokens": 40,
+        "output_tokens_details": { "thinking_tokens": 9 },
+        "server_tool_use": { "web_search_requests": 0, "web_fetch_requests": 0 },
+        "service_tier": "standard",
+        "cache_creation": {
+            "ephemeral_1h_input_tokens": 48_078,
+            "ephemeral_5m_input_tokens": 31
+        },
+        "inference_geo": "global",
+        "speed": "standard",
+        "fallback_credit": null
+    })
+}
+
+/// The counts [`usage`] holds.
+const USAGE_READ: Usage = Usage {
+    input: 2,
+    cache_read: 10_698,
+    cache_write: 48_109,
+    cache_write_5m: 31,
+    cache_write_1h: 48_078,
+    output: 40,
+    thinking: 9,
+};
+
+/// The counts [`assistant`] holds.
+const RECORD_USAGE_READ: Usage = Usage {
+    input: 3,
+    cache_read: 40,
+    cache_write: 7,
+    cache_write_5m: 0,
+    cache_write_1h: 7,
+    output: 12,
+    thinking: 0,
+};
+
+/// Each count a usage object holds, beside its pointer within the object.
+const COUNTS: [(UsageField, &str); 7] = [
+    (UsageField::Input, "/input_tokens"),
+    (UsageField::CacheRead, "/cache_read_input_tokens"),
+    (UsageField::CacheWrite, "/cache_creation_input_tokens"),
+    (
+        UsageField::CacheWrite5m,
+        "/cache_creation/ephemeral_5m_input_tokens",
+    ),
+    (
+        UsageField::CacheWrite1h,
+        "/cache_creation/ephemeral_1h_input_tokens",
+    ),
+    (UsageField::Output, "/output_tokens"),
+    (
+        UsageField::Thinking,
+        "/output_tokens_details/thinking_tokens",
+    ),
+];
+
+/// The least count a usage field is malformed at.
+const COUNT_PAST_THE_BOUND: u64 = TOKENS_PER_FIELD_MAX + 1;
+
 mod given_an_assistant_record {
     use super::*;
 
@@ -88,14 +168,7 @@ mod given_an_assistant_record {
             message_id: "msg_01".to_owned(),
             model: "claude-opus-5-5".to_owned(),
             effort: Some("high".to_owned()),
-            usage: Usage {
-                input: 3,
-                cache_read: 40,
-                cache_write_5m: 0,
-                cache_write_1h: 7,
-                output: 12,
-                thinking: 0,
-            },
+            usage: RECORD_USAGE_READ,
             blocks: vec![AssistantBlock::ToolUse(ToolUse {
                 id: "toolu_01".to_owned(),
                 name: "Bash".to_owned(),
@@ -216,10 +289,81 @@ mod given_an_assistant_record {
         set(
             &mut record,
             "/message/usage/input_tokens",
-            json!(10_000_001),
+            json!(COUNT_PAST_THE_BOUND),
         );
         let expected = Line::Malformed("/message/usage/input_tokens");
         assert_eq!(read(&record), expected);
+    }
+
+    #[test]
+    fn when_its_input_or_output_count_is_absent_or_null_then_the_pointer_names_it() {
+        let pointers = [
+            "/message/usage/input_tokens",
+            "/message/usage/output_tokens",
+        ];
+        for pointer in pointers {
+            let mut absent = assistant(&json!([]));
+            remove(&mut absent, pointer);
+            assert_eq!(read(&absent), Line::Malformed(pointer), "{pointer} absent");
+            let mut null = assistant(&json!([]));
+            set(&mut null, pointer, json!(null));
+            assert_eq!(read(&null), Line::Malformed(pointer), "{pointer} null");
+        }
+    }
+
+    #[test]
+    fn when_a_cache_count_is_absent_then_it_reads_counting_none_there() {
+        let cases = [
+            (
+                "/message/usage/cache_read_input_tokens",
+                Usage {
+                    cache_read: 0,
+                    ..RECORD_USAGE_READ
+                },
+            ),
+            (
+                "/message/usage/cache_creation_input_tokens",
+                Usage {
+                    cache_write: 0,
+                    ..RECORD_USAGE_READ
+                },
+            ),
+            (
+                "/message/usage/cache_creation",
+                Usage {
+                    cache_write_5m: 0,
+                    cache_write_1h: 0,
+                    ..RECORD_USAGE_READ
+                },
+            ),
+        ];
+        for (pointer, expected) in cases {
+            let mut record = assistant(&json!([]));
+            remove(&mut record, pointer);
+            let Line::Assistant(read) = read(&record) else {
+                panic!("an assistant record reads as one: {pointer}");
+            };
+            assert_eq!(read.usage, expected, "{pointer}");
+        }
+    }
+
+    #[test]
+    fn when_a_usage_count_fails_its_check_then_the_pointer_names_it_within_the_record() {
+        let pointers = [
+            "/message/usage/input_tokens",
+            "/message/usage/cache_read_input_tokens",
+            "/message/usage/cache_creation_input_tokens",
+            "/message/usage/cache_creation/ephemeral_5m_input_tokens",
+            "/message/usage/cache_creation/ephemeral_1h_input_tokens",
+            "/message/usage/output_tokens",
+            "/message/usage/output_tokens_details/thinking_tokens",
+        ];
+        for pointer in pointers {
+            let mut record = assistant(&json!([]));
+            set(&mut record, "/message/usage", usage());
+            set(&mut record, pointer, json!("many"));
+            assert_eq!(read(&record), Line::Malformed(pointer), "{pointer}");
+        }
     }
 
     #[test]
@@ -227,6 +371,159 @@ mod given_an_assistant_record {
         let content = json!([{ "type": "tool_use", "name": "Bash", "input": {} }]);
         let expected = Line::Malformed("/message/content/*/id");
         assert_eq!(read(&assistant(&content)), expected);
+    }
+}
+
+mod given_a_usage_object {
+    use super::*;
+
+    #[test]
+    fn when_read_then_every_count_is_kept() {
+        assert_eq!(read_usage(&usage()), Ok(USAGE_READ));
+    }
+
+    #[test]
+    fn when_its_input_or_output_count_is_absent_or_null_then_the_field_is_named() {
+        let cases = [
+            ("/input_tokens", UsageField::Input),
+            ("/output_tokens", UsageField::Output),
+        ];
+        for (pointer, field) in cases {
+            let mut absent = usage();
+            remove(&mut absent, pointer);
+            assert_eq!(read_usage(&absent), Err(field), "{pointer} absent");
+            let mut null = usage();
+            set(&mut null, pointer, json!(null));
+            assert_eq!(read_usage(&null), Err(field), "{pointer} null");
+        }
+    }
+
+    #[test]
+    fn when_a_cache_or_thinking_count_is_absent_or_null_then_it_counts_none() {
+        let cases = [
+            (
+                "/cache_read_input_tokens",
+                Usage {
+                    cache_read: 0,
+                    ..USAGE_READ
+                },
+            ),
+            (
+                "/cache_creation_input_tokens",
+                Usage {
+                    cache_write: 0,
+                    ..USAGE_READ
+                },
+            ),
+            (
+                "/cache_creation/ephemeral_5m_input_tokens",
+                Usage {
+                    cache_write_5m: 0,
+                    ..USAGE_READ
+                },
+            ),
+            (
+                "/cache_creation/ephemeral_1h_input_tokens",
+                Usage {
+                    cache_write_1h: 0,
+                    ..USAGE_READ
+                },
+            ),
+            (
+                "/output_tokens_details/thinking_tokens",
+                Usage {
+                    thinking: 0,
+                    ..USAGE_READ
+                },
+            ),
+        ];
+        for (pointer, expected) in cases {
+            let mut absent = usage();
+            remove(&mut absent, pointer);
+            assert_eq!(read_usage(&absent), Ok(expected), "{pointer} absent");
+            let mut null = usage();
+            set(&mut null, pointer, json!(null));
+            assert_eq!(read_usage(&null), Ok(expected), "{pointer} null");
+        }
+    }
+
+    #[test]
+    fn when_a_count_is_no_whole_number_within_its_bound_then_the_field_is_named() {
+        let broken = [
+            json!(-1),
+            json!(2.5),
+            json!("many"),
+            json!(COUNT_PAST_THE_BOUND),
+        ];
+        for (field, pointer) in COUNTS {
+            for count in &broken {
+                let mut read = usage();
+                set(&mut read, pointer, count.clone());
+                assert_eq!(read_usage(&read), Err(field), "{pointer} as {count}");
+            }
+        }
+    }
+
+    #[test]
+    fn when_every_count_stands_at_its_bound_then_each_is_kept() {
+        let mut read = usage();
+        for (_, pointer) in COUNTS {
+            set(&mut read, pointer, json!(TOKENS_PER_FIELD_MAX));
+        }
+        let expected = Usage {
+            input: TOKENS_PER_FIELD_MAX,
+            cache_read: TOKENS_PER_FIELD_MAX,
+            cache_write: TOKENS_PER_FIELD_MAX,
+            cache_write_5m: TOKENS_PER_FIELD_MAX,
+            cache_write_1h: TOKENS_PER_FIELD_MAX,
+            output: TOKENS_PER_FIELD_MAX,
+            thinking: TOKENS_PER_FIELD_MAX,
+        };
+        assert_eq!(read_usage(&read), Ok(expected));
+    }
+
+    #[test]
+    fn when_a_breakdown_is_absent_or_null_then_its_counts_count_none() {
+        let cases = [
+            (
+                "/cache_creation",
+                Usage {
+                    cache_write_5m: 0,
+                    cache_write_1h: 0,
+                    ..USAGE_READ
+                },
+            ),
+            (
+                "/output_tokens_details",
+                Usage {
+                    thinking: 0,
+                    ..USAGE_READ
+                },
+            ),
+        ];
+        for (pointer, expected) in cases {
+            let mut absent = usage();
+            remove(&mut absent, pointer);
+            assert_eq!(read_usage(&absent), Ok(expected), "{pointer} absent");
+            let mut null = usage();
+            set(&mut null, pointer, json!(null));
+            assert_eq!(read_usage(&null), Ok(expected), "{pointer} null");
+        }
+    }
+
+    #[test]
+    fn when_it_is_no_object_then_the_whole_is_named() {
+        for whole in [json!(null), json!([]), json!(7)] {
+            assert_eq!(read_usage(&whole), Err(UsageField::Whole), "{whole}");
+        }
+    }
+
+    #[test]
+    fn when_a_field_is_named_then_its_pointer_is_where_the_object_holds_it() {
+        assert_eq!(UsageField::Whole.pointer(), "");
+        for (field, pointer) in COUNTS {
+            assert_eq!(field.pointer(), pointer, "{field:?}");
+        }
     }
 }
 
