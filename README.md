@@ -1,6 +1,6 @@
 # claude-code-transcript
 
-Reads the transcripts Claude Code keeps under `~/.claude/projects`: which file is whose session and thread, each file's lines under bounds, each line as a typed record, and each tool call paired with its result.
+Reads the transcripts Claude Code keeps under `~/.claude/projects`: which file is whose session and thread, each file's lines under bounds, each line as a typed record, a usage object alone as its token counts, and each tool call paired with its result.
 
 ```rust
 use claude_code_transcript::lines::{Lines, Piece};

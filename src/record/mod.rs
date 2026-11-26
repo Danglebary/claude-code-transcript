@@ -1,7 +1,7 @@
 //! One line of a transcript read into what it records. Everything here is pure.
 //!
 //! The shape is the one Claude Code's files hold, read off this machine's transcripts
-//! (checked 2026-11-05): one JSON object per line, written without spaces; the record's
+//! (checked 2026-11-26): one JSON object per line, written without spaces; the record's
 //! kind under `type`; the session under `sessionId`, the instant under `timestamp`, a
 //! subagent's id under `agentId`, the directory the session ran in under `cwd`, the
 //! branch git named there under `gitBranch`, and the Claude Code release that wrote the
@@ -47,6 +47,7 @@ const COMMIT: &str = "/toolUseResult/gitOperation/commit";
 const COMMIT_SHA: &str = "/toolUseResult/gitOperation/commit/sha";
 const COMMIT_KIND: &str = "/toolUseResult/gitOperation/commit/kind";
 const COMMIT_BRANCH: &str = "/toolUseResult/gitOperation/commit/branch";
+const USAGE: &str = "/message/usage";
 
 /// What one line of a transcript records.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,7 +105,8 @@ pub struct Assistant {
     pub blocks: Vec<AssistantBlock>,
 }
 
-/// The tokens one call reports.
+/// The tokens one call reports. A usage object always states the input and the output, and
+/// a cache or thinking count it leaves out counts none.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Usage {
     /// Input read uncached.
@@ -119,6 +121,46 @@ pub struct Usage {
     pub output: u64,
     /// The part of `output` the model spent thinking.
     pub thinking: u64,
+}
+
+/// A field of a usage object that fails its check.
+///
+/// The Messages API requires a usage object's input and output counts and leaves its cache
+/// counts and its output's breakdown optional:
+/// <https://github.com/anthropics/anthropic-sdk-python/blob/main/src/anthropic/types/usage.py>
+/// — checked 2026-11-26.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsageField {
+    /// The usage object itself, which is no JSON object.
+    Whole,
+    /// The uncached input, which every usage object states.
+    Input,
+    /// The input read from the cache.
+    CacheRead,
+    /// The input written to the cache that lives five minutes.
+    CacheWrite5m,
+    /// The input written to the cache that lives an hour.
+    CacheWrite1h,
+    /// The output, which every usage object states.
+    Output,
+    /// The part of the output the model spent thinking.
+    Thinking,
+}
+
+impl UsageField {
+    /// The JSON pointer naming the field within the usage object, empty for the whole.
+    #[must_use]
+    pub const fn pointer(self) -> &'static str {
+        match self {
+            Self::Whole => "",
+            Self::Input => "/input_tokens",
+            Self::CacheRead => "/cache_read_input_tokens",
+            Self::CacheWrite5m => "/cache_creation/ephemeral_5m_input_tokens",
+            Self::CacheWrite1h => "/cache_creation/ephemeral_1h_input_tokens",
+            Self::Output => "/output_tokens",
+            Self::Thinking => "/output_tokens_details/thinking_tokens",
+        }
+    }
 }
 
 /// One block of a model call's content.
@@ -406,32 +448,58 @@ fn assistant_of(value: &Value) -> Result<Assistant, &'static str> {
     })
 }
 
+/// Reads the token counts of one usage object, in the shape an assistant record holds
+/// under `message.usage`.
+///
+/// # Errors
+///
+/// The [`UsageField`] failing its check: [`UsageField::Whole`] where `usage` is no JSON
+/// object, the input or the output count where it is absent or null, and any count that
+/// stands and is no whole number up to [`TOKENS_PER_FIELD_MAX`]. An absent or null cache
+/// or thinking count counts none.
+///
+/// # Panics
+///
+/// Only on a defect here: the input and the output returned are asserted to stand within
+/// the bound their check holds them to.
+pub fn read_usage(usage: &Value) -> Result<Usage, UsageField> {
+    if !usage.is_object() {
+        return Err(UsageField::Whole);
+    }
+    let read = Usage {
+        input: required_tokens_of(usage, UsageField::Input)?,
+        cache_read: optional_tokens_of(usage, UsageField::CacheRead)?,
+        cache_write_5m: optional_tokens_of(usage, UsageField::CacheWrite5m)?,
+        cache_write_1h: optional_tokens_of(usage, UsageField::CacheWrite1h)?,
+        output: required_tokens_of(usage, UsageField::Output)?,
+        thinking: optional_tokens_of(usage, UsageField::Thinking)?,
+    };
+    assert!(read.input <= TOKENS_PER_FIELD_MAX, "the input is bounded");
+    assert!(read.output <= TOKENS_PER_FIELD_MAX, "the output is bounded");
+    Ok(read)
+}
+
 fn usage_of(value: &Value) -> Result<Usage, &'static str> {
-    let Some(Value::Object(_)) = value.pointer("/message/usage") else {
-        return Err("/message/usage");
+    let Some(usage) = value.pointer(USAGE) else {
+        return Err(USAGE);
     };
-    let usage = Usage {
-        input: tokens_at(value, "/message/usage/input_tokens")?,
-        cache_read: tokens_at(value, "/message/usage/cache_read_input_tokens")?,
-        cache_write_5m: tokens_at(
-            value,
-            "/message/usage/cache_creation/ephemeral_5m_input_tokens",
-        )?,
-        cache_write_1h: tokens_at(
-            value,
-            "/message/usage/cache_creation/ephemeral_1h_input_tokens",
-        )?,
-        output: tokens_at(value, "/message/usage/output_tokens")?,
-        thinking: tokens_at(
-            value,
-            "/message/usage/output_tokens_details/thinking_tokens",
-        )?,
-    };
-    assert!(
-        usage.output <= TOKENS_PER_FIELD_MAX,
-        "the output is bounded"
-    );
-    Ok(usage)
+    match read_usage(usage) {
+        Ok(read) => Ok(read),
+        Err(field) => Err(record_pointer_of(field)),
+    }
+}
+
+/// The pointer naming a usage object's field within the assistant record holding it.
+const fn record_pointer_of(field: UsageField) -> &'static str {
+    match field {
+        UsageField::Whole => USAGE,
+        UsageField::Input => "/message/usage/input_tokens",
+        UsageField::CacheRead => "/message/usage/cache_read_input_tokens",
+        UsageField::CacheWrite5m => "/message/usage/cache_creation/ephemeral_5m_input_tokens",
+        UsageField::CacheWrite1h => "/message/usage/cache_creation/ephemeral_1h_input_tokens",
+        UsageField::Output => "/message/usage/output_tokens",
+        UsageField::Thinking => "/message/usage/output_tokens_details/thinking_tokens",
+    }
 }
 
 fn assistant_block_of(block: &Value) -> Result<AssistantBlock, &'static str> {
@@ -688,14 +756,37 @@ fn flag_at(value: &Value, pointer: &str, reported: &'static str) -> Result<bool,
     }
 }
 
-/// A count of tokens, an absent field counting none.
-fn tokens_at(value: &Value, pointer: &'static str) -> Result<u64, &'static str> {
-    match value.pointer(pointer) {
+/// A count of tokens every usage object holds, refusing an absent or null one.
+fn required_tokens_of(usage: &Value, field: UsageField) -> Result<u64, UsageField> {
+    match usage.pointer(field.pointer()) {
+        None | Some(Value::Null) => Err(field),
+        Some(stated) => tokens_of(stated, field),
+    }
+}
+
+/// A count of tokens a usage object may leave out, an absent or null one counting none.
+fn optional_tokens_of(usage: &Value, field: UsageField) -> Result<u64, UsageField> {
+    match usage.pointer(field.pointer()) {
         None | Some(Value::Null) => Ok(0),
-        Some(field) => match field.as_u64() {
-            Some(count) if count <= TOKENS_PER_FIELD_MAX => Ok(count),
-            Some(_) | None => Err(pointer),
-        },
+        Some(stated) => tokens_of(stated, field),
+    }
+}
+
+/// The count a field states, refusing anything but a whole number up to the bound.
+fn tokens_of(stated: &Value, field: UsageField) -> Result<u64, UsageField> {
+    assert!(
+        !stated.is_null(),
+        "an absent count is decided by its caller"
+    );
+    match stated.as_u64() {
+        Some(count) => {
+            if count <= TOKENS_PER_FIELD_MAX {
+                Ok(count)
+            } else {
+                Err(field)
+            }
+        }
+        None => Err(field),
     }
 }
 
