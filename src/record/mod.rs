@@ -105,14 +105,17 @@ pub struct Assistant {
     pub blocks: Vec<AssistantBlock>,
 }
 
-/// The tokens one call reports. A usage object always states the input and the output, and
-/// a cache or thinking count it leaves out counts none.
+/// The tokens one call reports, each as the usage object states it. A usage object always
+/// states the input and the output, and a cache or thinking count it leaves out counts none.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Usage {
     /// Input read uncached.
     pub input: u64,
     /// Input read from the cache.
     pub cache_read: u64,
+    /// Input written to the cache, as the object totals it across both lifetimes. It is read
+    /// apart from the two counts below, which break it down where the object does.
+    pub cache_write: u64,
     /// Input written to the cache that lives five minutes.
     pub cache_write_5m: u64,
     /// Input written to the cache that lives an hour.
@@ -137,6 +140,8 @@ pub enum UsageField {
     Input,
     /// The input read from the cache.
     CacheRead,
+    /// The input written to the cache, as the object totals it.
+    CacheWrite,
     /// The input written to the cache that lives five minutes.
     CacheWrite5m,
     /// The input written to the cache that lives an hour.
@@ -151,16 +156,68 @@ impl UsageField {
     /// The JSON pointer naming the field within the usage object, empty for the whole.
     #[must_use]
     pub const fn pointer(self) -> &'static str {
+        self.place().within_usage
+    }
+
+    /// The JSON pointer naming the field within the assistant record holding the usage
+    /// object under `message.usage`.
+    fn record_pointer(self) -> &'static str {
+        let place = self.place();
+        assert!(
+            place.within_record.starts_with(USAGE),
+            "a record holds its usage under the message"
+        );
+        assert!(
+            place.within_record.ends_with(place.within_usage),
+            "a field stands at one place within its usage object"
+        );
+        place.within_record
+    }
+
+    const fn place(self) -> Place {
         match self {
-            Self::Whole => "",
-            Self::Input => "/input_tokens",
-            Self::CacheRead => "/cache_read_input_tokens",
-            Self::CacheWrite5m => "/cache_creation/ephemeral_5m_input_tokens",
-            Self::CacheWrite1h => "/cache_creation/ephemeral_1h_input_tokens",
-            Self::Output => "/output_tokens",
-            Self::Thinking => "/output_tokens_details/thinking_tokens",
+            Self::Whole => Place {
+                within_usage: "",
+                within_record: USAGE,
+            },
+            Self::Input => Place {
+                within_usage: "/input_tokens",
+                within_record: "/message/usage/input_tokens",
+            },
+            Self::CacheRead => Place {
+                within_usage: "/cache_read_input_tokens",
+                within_record: "/message/usage/cache_read_input_tokens",
+            },
+            Self::CacheWrite => Place {
+                within_usage: "/cache_creation_input_tokens",
+                within_record: "/message/usage/cache_creation_input_tokens",
+            },
+            Self::CacheWrite5m => Place {
+                within_usage: "/cache_creation/ephemeral_5m_input_tokens",
+                within_record: "/message/usage/cache_creation/ephemeral_5m_input_tokens",
+            },
+            Self::CacheWrite1h => Place {
+                within_usage: "/cache_creation/ephemeral_1h_input_tokens",
+                within_record: "/message/usage/cache_creation/ephemeral_1h_input_tokens",
+            },
+            Self::Output => Place {
+                within_usage: "/output_tokens",
+                within_record: "/message/usage/output_tokens",
+            },
+            Self::Thinking => Place {
+                within_usage: "/output_tokens_details/thinking_tokens",
+                within_record: "/message/usage/output_tokens_details/thinking_tokens",
+            },
         }
     }
+}
+
+/// Where a usage object's field stands, as a JSON pointer within the object and within the
+/// assistant record holding it.
+#[derive(Debug, Clone, Copy)]
+struct Place {
+    within_usage: &'static str,
+    within_record: &'static str,
 }
 
 /// One block of a model call's content.
@@ -460,22 +517,33 @@ fn assistant_of(value: &Value) -> Result<Assistant, &'static str> {
 ///
 /// # Panics
 ///
-/// Only on a defect here: the input and the output returned are asserted to stand within
-/// the bound their check holds them to.
+/// Only on a defect here: every count returned is asserted to stand within the bound its
+/// check holds it to.
 pub fn read_usage(usage: &Value) -> Result<Usage, UsageField> {
-    if !usage.is_object() {
+    let Value::Object(_) = usage else {
         return Err(UsageField::Whole);
-    }
+    };
     let read = Usage {
         input: required_tokens_of(usage, UsageField::Input)?,
         cache_read: optional_tokens_of(usage, UsageField::CacheRead)?,
+        cache_write: optional_tokens_of(usage, UsageField::CacheWrite)?,
         cache_write_5m: optional_tokens_of(usage, UsageField::CacheWrite5m)?,
         cache_write_1h: optional_tokens_of(usage, UsageField::CacheWrite1h)?,
         output: required_tokens_of(usage, UsageField::Output)?,
         thinking: optional_tokens_of(usage, UsageField::Thinking)?,
     };
-    assert!(read.input <= TOKENS_PER_FIELD_MAX, "the input is bounded");
-    assert!(read.output <= TOKENS_PER_FIELD_MAX, "the output is bounded");
+    let counts = [
+        read.input,
+        read.cache_read,
+        read.cache_write,
+        read.cache_write_5m,
+        read.cache_write_1h,
+        read.output,
+        read.thinking,
+    ];
+    for count in counts {
+        assert!(count <= TOKENS_PER_FIELD_MAX, "every count is bounded");
+    }
     Ok(read)
 }
 
@@ -485,20 +553,7 @@ fn usage_of(value: &Value) -> Result<Usage, &'static str> {
     };
     match read_usage(usage) {
         Ok(read) => Ok(read),
-        Err(field) => Err(record_pointer_of(field)),
-    }
-}
-
-/// The pointer naming a usage object's field within the assistant record holding it.
-const fn record_pointer_of(field: UsageField) -> &'static str {
-    match field {
-        UsageField::Whole => USAGE,
-        UsageField::Input => "/message/usage/input_tokens",
-        UsageField::CacheRead => "/message/usage/cache_read_input_tokens",
-        UsageField::CacheWrite5m => "/message/usage/cache_creation/ephemeral_5m_input_tokens",
-        UsageField::CacheWrite1h => "/message/usage/cache_creation/ephemeral_1h_input_tokens",
-        UsageField::Output => "/message/usage/output_tokens",
-        UsageField::Thinking => "/message/usage/output_tokens_details/thinking_tokens",
+        Err(field) => Err(field.record_pointer()),
     }
 }
 

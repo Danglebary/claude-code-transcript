@@ -8,8 +8,8 @@ use serde_json::{Value, json};
 
 use super::{
     Assistant, AssistantBlock, Attachment, Commit, CommitKind, CommitReport, Compaction, Envelope,
-    Line, ResultPart, TextClass, ToolResult, ToolUse, Usage, UsageField, User, UserBlock,
-    WHOLE_LINE, class_of, read_line, read_usage,
+    Line, ResultPart, TOKENS_PER_FIELD_MAX, TextClass, ToolResult, ToolUse, Usage, UsageField,
+    User, UserBlock, WHOLE_LINE, class_of, read_line, read_usage,
 };
 
 const SESSION: &str = "9d5fe9d0-d389-44a2-a3ba-a29db8bbb544";
@@ -46,6 +46,7 @@ fn assistant(content: &Value) -> Value {
             "usage": {
                 "input_tokens": 3,
                 "cache_read_input_tokens": 40,
+                "cache_creation_input_tokens": 7,
                 "cache_creation": {
                     "ephemeral_5m_input_tokens": 0,
                     "ephemeral_1h_input_tokens": 7
@@ -113,11 +114,46 @@ fn usage() -> Value {
 const USAGE_READ: Usage = Usage {
     input: 2,
     cache_read: 10_698,
+    cache_write: 48_109,
     cache_write_5m: 31,
     cache_write_1h: 48_078,
     output: 40,
     thinking: 9,
 };
+
+/// The counts [`assistant`] holds.
+const RECORD_USAGE_READ: Usage = Usage {
+    input: 3,
+    cache_read: 40,
+    cache_write: 7,
+    cache_write_5m: 0,
+    cache_write_1h: 7,
+    output: 12,
+    thinking: 0,
+};
+
+/// Each count a usage object holds, beside its pointer within the object.
+const COUNTS: [(UsageField, &str); 7] = [
+    (UsageField::Input, "/input_tokens"),
+    (UsageField::CacheRead, "/cache_read_input_tokens"),
+    (UsageField::CacheWrite, "/cache_creation_input_tokens"),
+    (
+        UsageField::CacheWrite5m,
+        "/cache_creation/ephemeral_5m_input_tokens",
+    ),
+    (
+        UsageField::CacheWrite1h,
+        "/cache_creation/ephemeral_1h_input_tokens",
+    ),
+    (UsageField::Output, "/output_tokens"),
+    (
+        UsageField::Thinking,
+        "/output_tokens_details/thinking_tokens",
+    ),
+];
+
+/// The least count a usage field is malformed at.
+const COUNT_PAST_THE_BOUND: u64 = TOKENS_PER_FIELD_MAX + 1;
 
 mod given_an_assistant_record {
     use super::*;
@@ -132,14 +168,7 @@ mod given_an_assistant_record {
             message_id: "msg_01".to_owned(),
             model: "claude-opus-5-5".to_owned(),
             effort: Some("high".to_owned()),
-            usage: Usage {
-                input: 3,
-                cache_read: 40,
-                cache_write_5m: 0,
-                cache_write_1h: 7,
-                output: 12,
-                thinking: 0,
-            },
+            usage: RECORD_USAGE_READ,
             blocks: vec![AssistantBlock::ToolUse(ToolUse {
                 id: "toolu_01".to_owned(),
                 name: "Bash".to_owned(),
@@ -260,7 +289,7 @@ mod given_an_assistant_record {
         set(
             &mut record,
             "/message/usage/input_tokens",
-            json!(10_000_001),
+            json!(COUNT_PAST_THE_BOUND),
         );
         let expected = Line::Malformed("/message/usage/input_tokens");
         assert_eq!(read(&record), expected);
@@ -283,19 +312,39 @@ mod given_an_assistant_record {
     }
 
     #[test]
-    fn when_its_cache_counts_are_absent_then_it_reads_counting_none_cached() {
-        let mut record = assistant(&json!([]));
-        remove(&mut record, "/message/usage/cache_read_input_tokens");
-        remove(&mut record, "/message/usage/cache_creation");
-        let Line::Assistant(read) = read(&record) else {
-            panic!("an assistant record reads as one");
-        };
-        let expected = Usage {
-            input: 3,
-            output: 12,
-            ..Usage::default()
-        };
-        assert_eq!(read.usage, expected);
+    fn when_a_cache_count_is_absent_then_it_reads_counting_none_there() {
+        let cases = [
+            (
+                "/message/usage/cache_read_input_tokens",
+                Usage {
+                    cache_read: 0,
+                    ..RECORD_USAGE_READ
+                },
+            ),
+            (
+                "/message/usage/cache_creation_input_tokens",
+                Usage {
+                    cache_write: 0,
+                    ..RECORD_USAGE_READ
+                },
+            ),
+            (
+                "/message/usage/cache_creation",
+                Usage {
+                    cache_write_5m: 0,
+                    cache_write_1h: 0,
+                    ..RECORD_USAGE_READ
+                },
+            ),
+        ];
+        for (pointer, expected) in cases {
+            let mut record = assistant(&json!([]));
+            remove(&mut record, pointer);
+            let Line::Assistant(read) = read(&record) else {
+                panic!("an assistant record reads as one: {pointer}");
+            };
+            assert_eq!(read.usage, expected, "{pointer}");
+        }
     }
 
     #[test]
@@ -303,6 +352,7 @@ mod given_an_assistant_record {
         let pointers = [
             "/message/usage/input_tokens",
             "/message/usage/cache_read_input_tokens",
+            "/message/usage/cache_creation_input_tokens",
             "/message/usage/cache_creation/ephemeral_5m_input_tokens",
             "/message/usage/cache_creation/ephemeral_1h_input_tokens",
             "/message/usage/output_tokens",
@@ -359,6 +409,13 @@ mod given_a_usage_object {
                 },
             ),
             (
+                "/cache_creation_input_tokens",
+                Usage {
+                    cache_write: 0,
+                    ..USAGE_READ
+                },
+            ),
+            (
                 "/cache_creation/ephemeral_5m_input_tokens",
                 Usage {
                     cache_write_5m: 0,
@@ -392,30 +449,65 @@ mod given_a_usage_object {
 
     #[test]
     fn when_a_count_is_no_whole_number_within_its_bound_then_the_field_is_named() {
-        let cases = [
-            ("/input_tokens", UsageField::Input),
-            ("/cache_read_input_tokens", UsageField::CacheRead),
-            (
-                "/cache_creation/ephemeral_5m_input_tokens",
-                UsageField::CacheWrite5m,
-            ),
-            (
-                "/cache_creation/ephemeral_1h_input_tokens",
-                UsageField::CacheWrite1h,
-            ),
-            ("/output_tokens", UsageField::Output),
-            (
-                "/output_tokens_details/thinking_tokens",
-                UsageField::Thinking,
-            ),
+        let broken = [
+            json!(-1),
+            json!(2.5),
+            json!("many"),
+            json!(COUNT_PAST_THE_BOUND),
         ];
-        let broken = [json!(-1), json!(2.5), json!("many"), json!(10_000_001)];
-        for (pointer, field) in cases {
+        for (field, pointer) in COUNTS {
             for count in &broken {
                 let mut read = usage();
                 set(&mut read, pointer, count.clone());
                 assert_eq!(read_usage(&read), Err(field), "{pointer} as {count}");
             }
+        }
+    }
+
+    #[test]
+    fn when_every_count_stands_at_its_bound_then_each_is_kept() {
+        let mut read = usage();
+        for (_, pointer) in COUNTS {
+            set(&mut read, pointer, json!(TOKENS_PER_FIELD_MAX));
+        }
+        let expected = Usage {
+            input: TOKENS_PER_FIELD_MAX,
+            cache_read: TOKENS_PER_FIELD_MAX,
+            cache_write: TOKENS_PER_FIELD_MAX,
+            cache_write_5m: TOKENS_PER_FIELD_MAX,
+            cache_write_1h: TOKENS_PER_FIELD_MAX,
+            output: TOKENS_PER_FIELD_MAX,
+            thinking: TOKENS_PER_FIELD_MAX,
+        };
+        assert_eq!(read_usage(&read), Ok(expected));
+    }
+
+    #[test]
+    fn when_a_breakdown_is_absent_or_null_then_its_counts_count_none() {
+        let cases = [
+            (
+                "/cache_creation",
+                Usage {
+                    cache_write_5m: 0,
+                    cache_write_1h: 0,
+                    ..USAGE_READ
+                },
+            ),
+            (
+                "/output_tokens_details",
+                Usage {
+                    thinking: 0,
+                    ..USAGE_READ
+                },
+            ),
+        ];
+        for (pointer, expected) in cases {
+            let mut absent = usage();
+            remove(&mut absent, pointer);
+            assert_eq!(read_usage(&absent), Ok(expected), "{pointer} absent");
+            let mut null = usage();
+            set(&mut null, pointer, json!(null));
+            assert_eq!(read_usage(&null), Ok(expected), "{pointer} null");
         }
     }
 
@@ -428,25 +520,8 @@ mod given_a_usage_object {
 
     #[test]
     fn when_a_field_is_named_then_its_pointer_is_where_the_object_holds_it() {
-        let cases = [
-            (UsageField::Whole, ""),
-            (UsageField::Input, "/input_tokens"),
-            (UsageField::CacheRead, "/cache_read_input_tokens"),
-            (
-                UsageField::CacheWrite5m,
-                "/cache_creation/ephemeral_5m_input_tokens",
-            ),
-            (
-                UsageField::CacheWrite1h,
-                "/cache_creation/ephemeral_1h_input_tokens",
-            ),
-            (UsageField::Output, "/output_tokens"),
-            (
-                UsageField::Thinking,
-                "/output_tokens_details/thinking_tokens",
-            ),
-        ];
-        for (field, pointer) in cases {
+        assert_eq!(UsageField::Whole.pointer(), "");
+        for (field, pointer) in COUNTS {
             assert_eq!(field.pointer(), pointer, "{field:?}");
         }
     }
